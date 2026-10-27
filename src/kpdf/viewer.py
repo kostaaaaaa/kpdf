@@ -45,6 +45,8 @@ from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
+from . import state  # noqa: E402
+
 # ----------------------------------------------------------------- tunables
 GAP = 12  # px between pages
 STEP = 70  # px per h/j/k/l press
@@ -236,6 +238,7 @@ def collect_links(doc):
 class Viewer(QWidget):
     def __init__(self, path):
         super().__init__()
+        self.path = path
         self.doc = fitz.open(path)
         if self.doc.needs_pass:
             raise SystemExit("Encrypted PDFs are not supported.")
@@ -275,6 +278,35 @@ class Viewer(QWidget):
         self.tops = []
         self.relayout()
         self.apply_fit()
+        self._restore_position()
+
+    # ---- resume position (see state.py): three numbers per PDF, saved on close
+    def _restore_position(self):
+        pos = state.load(self.path)
+        if pos is None:
+            return
+        if pos.fit in ("w", "s"):
+            self.fit = pos.fit
+            self.apply_fit()
+        else:
+            self.fit = None
+            self.set_zoom(float(pos.fit))
+        i = min(pos.page, self.n - 1)
+        # the middle of the window is the anchor, exactly as in set_zoom()
+        self.sy = self.tops[i] + pos.frac * self.sizes[i][1] * self.zoom - self.height() / 2
+        self.clamp()
+        self.update()
+
+    def _save_position(self):
+        cy = self.sy + self.height() / 2
+        i = self.page_at(cy)
+        frac = (cy - self.tops[i]) / (self.sizes[i][1] * self.zoom)
+        fit = self.fit or f"{self.zoom:.3f}"
+        state.save(self.path, state.Position(i, min(max(frac, 0.0), 1.0), fit))
+
+    def closeEvent(self, e):
+        self._save_position()
+        super().closeEvent(e)
 
     # ---- links are collected lazily: the window shows first, pages are scanned in idle time
     def _pump_links(self):
