@@ -47,10 +47,9 @@ from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap  # noqa: 
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from . import state  # noqa: E402
+from .helpview import draw_help  # noqa: E402
 from .search import PageSearch  # noqa: E402
 from .searchbar import SearchBar  # noqa: E402
-from .helptext import as_text  # noqa: E402
-from .helpview import draw_help  # noqa: E402
 
 # ----------------------------------------------------------------- tunables
 GAP = 12  # px between pages
@@ -1183,10 +1182,9 @@ class Viewer(QWidget):
         shift = bool(m & Qt.KeyboardModifier.ShiftModifier)
         vh = self.height()
 
-        if self.help:
-            if k == K.Key_Escape or t == "`" or k == K.Key_QuoteLeft:
-                self._toggle_help()
-                return
+        if self.help and (k == K.Key_Escape or t == "`" or k == K.Key_QuoteLeft):
+            self._toggle_help()
+            return
 
         if ctrl:
             if k == K.Key_D:
