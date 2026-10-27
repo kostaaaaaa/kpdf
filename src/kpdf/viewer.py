@@ -1134,7 +1134,8 @@ class Viewer(QWidget):
             g = self._gfx_cache[pno] = [
                 b
                 for b in boxes
-                if _finite(*b) and not (b[2] - b[0] > 0.95 * P.width and b[3] - b[1] > 0.8 * P.height)
+                if _finite(*b)
+                and not (b[2] - b[0] > 0.95 * P.width and b[3] - b[1] > 0.8 * P.height)
             ]
         return g
 
