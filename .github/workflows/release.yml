@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi            # create this environment in the repo settings
+    permissions:
+      id-token: write            # PyPI trusted publishing: no API token is stored anywhere
+      contents: write            # create the GitHub Release
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0         # setuptools-scm derives the version from the tag
+      - uses: astral-sh/setup-uv@v8.1.0
+      - run: uv build
+      - run: uvx twine check --strict dist/*
+      - run: uv publish
+      - name: GitHub Release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
