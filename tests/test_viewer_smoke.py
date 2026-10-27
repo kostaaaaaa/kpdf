@@ -24,13 +24,21 @@ def test_links_are_collected_lazily(qapp, paper_pdf):
     v.close()
 
 
+def wait_until(cond, timeout=3000, step=10):
+    waited = 0
+    while not cond() and waited < timeout:
+        QTest.qWait(step)
+        waited += step
+    return cond()
+
+
 def test_slash_selects_link_and_shows_preview(viewer):
     QTest.keyClick(viewer, "/")
+    # highlight is immediate; the preview is built a moment later unless already cached
     assert viewer.sel_active and 0 <= viewer.sel < len(viewer.links)
-    assert viewer.preview is not None
+    assert wait_until(lambda: viewer.preview is not None)
     QTest.keyClick(viewer, Qt.Key.Key_Escape)
     assert viewer.preview is None
-
 
 def test_cycle_forward_and_back(viewer):
     QTest.keyClick(viewer, "/")
