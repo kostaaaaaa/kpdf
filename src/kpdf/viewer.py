@@ -22,6 +22,7 @@ Keys
   Enter          follow the selected link
   Backspace / Ctrl-o   go back to where you were before following a link / jumping
   i              invert colours
+  Ctrl-\\      toggle the bottom PDF hotbar; h/j/k/l select, Enter opens
   q              quit
 """
 
@@ -50,6 +51,7 @@ from . import state  # noqa: E402
 from .helpview import draw_help  # noqa: E402
 from .search import PageSearch  # noqa: E402
 from .searchbar import SearchBar  # noqa: E402
+from .tree_sitter import PdfTreeSitter  # noqa: E402
 
 # ----------------------------------------------------------------- tunables
 GAP = 12  # px between pages
@@ -293,6 +295,58 @@ class Viewer(QWidget):
         self.relayout()
         self.apply_fit()
         self._restore_position()
+        self.tree_sitter = PdfTreeSitter(self)
+
+    def open_pdf(self, path):
+        """Replace the current PDF in this window, preserving the viewer instance."""
+        path = os.path.abspath(os.path.expanduser(path))
+        if path == os.path.abspath(self.path):
+            return
+        new_doc = fitz.open(path)
+        if new_doc.needs_pass:
+            new_doc.close()
+            print("kpdf: encrypted PDFs are not supported", file=sys.stderr)
+            return
+        if new_doc.page_count == 0:
+            new_doc.close()
+            print("kpdf: empty document", file=sys.stderr)
+            return
+
+        self._save_position()
+        old_doc = self.doc
+        self.doc = new_doc
+        self.path = path
+        self.n = self.doc.page_count
+        self.sizes = [(self.doc[i].rect.width, self.doc[i].rect.height) for i in range(self.n)]
+        self.zoom = 1.0
+        self.sx = self.sy = 0.0
+        self.fit = "w"
+        self.invert = False
+        self.cache.clear()
+        self._lines.clear()
+        self._mathflag.clear()
+        self._cols.clear()
+        self._refs = None
+        self._refs_done = False
+        self._links = []
+        self._link_iter = iter_page_links(self.doc)
+        QTimer.singleShot(0, self._pump_links)
+        self.sel = -1
+        self.close_preview()
+        self.history.clear()
+        self.num = ""
+        self.num_timer.stop()
+        self.close_search()
+        self.help = False
+        self._s_wrapped = False
+        self.setWindowTitle(os.path.basename(path))
+        self.relayout()
+        self.apply_fit()
+        self._restore_position()
+        old_doc.close()
+        if hasattr(self, "tree_sitter"):
+            self.tree_sitter.refresh()
+        self.update()
 
     # ---- resume position (see state.py): three numbers per PDF, saved on close
     def _restore_position(self):
@@ -516,6 +570,8 @@ class Viewer(QWidget):
 
     def resizeEvent(self, e):
         self._bar.place()
+        if hasattr(self, "tree_sitter"):
+            self.tree_sitter.resize_to_parent()
         self.relayout()
         if self.fit:
             self.apply_fit()
@@ -1184,6 +1240,10 @@ class Viewer(QWidget):
 
         if self.help and (k == K.Key_Escape or t == "`" or k == K.Key_QuoteLeft):
             self._toggle_help()
+            return
+
+        if ctrl and k == K.Key_Backslash:
+            self.tree_sitter.toggle()
             return
 
         if ctrl:
