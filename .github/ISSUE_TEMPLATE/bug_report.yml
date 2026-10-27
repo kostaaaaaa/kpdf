@@ -1,0 +1,39 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: kpdf version
+      description: Output of `kpdf --version`
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Distro, desktop session (Wayland or X11), Python version, how you installed kpdf
+      placeholder: "Arch Linux, Wayland, Python 3.12, uv tool install"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: |
+        If a specific PDF triggers it, please say where it comes from (for example an arXiv id)
+        rather than attaching private or copyrighted files.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Terminal output
+      render: text

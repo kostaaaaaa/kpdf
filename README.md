@@ -12,8 +12,8 @@ Install it once as an isolated tool; no virtualenv to activate, and `kpdf` works
 
 ```sh
 # straight from GitHub
-uv tool install git+https://github.com/<your-username>/kpdf
-# or: pipx install git+https://github.com/<your-username>/kpdf
+uv tool install git+https://github.com/kostaaaaaa/kpdf
+# or: pipx install git+https://github.com/kostaaaaaa/kpdf
 
 kpdf paper.pdf
 ```
@@ -68,30 +68,6 @@ PyMuPDF 2.x imports an ONNX-based layout analysis stack whenever `pymupdf` is im
 roughly half a second to every launch and pulls in numpy and onnxruntime. kpdf does not use it, so
 the dependency is `pymupdf>=1.23,<2` and `viewer.py` also blocks that import if 2.x ends up installed.
 `tests/test_import_weight.py` guards against this regressing.
-
-## Releasing
-
-The version comes from the git tag (setuptools-scm), so there is nothing to edit:
-
-1. Move the `Unreleased` entries in `CHANGELOG.md` under a new `## [x.y.z]` heading and merge to `main`.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`
-
-The `Release` workflow then builds the sdist and wheel, publishes to PyPI with trusted publishing
-(no stored token) and creates a GitHub Release with generated notes.
-
-Building from a source tarball that has no git metadata (for example an Arch `PKGBUILD`)? Set
-`SETUPTOOLS_SCM_PRETEND_VERSION=<version>` in the build environment.
-
-### One-time repository setup
-
-* **PyPI:** add a [trusted publisher](https://docs.pypi.org/trusted-publishers/) for this repo with
-  workflow `release.yml` and environment `pypi`. In GitHub, create an environment named `pypi`
-  (optionally requiring your approval before each release).
-* **Branch protection** (Settings > Rules) on `main`: require a pull request and the status checks
-  `lint`, `test (3.12)`, `test (3.13)`, `build`; block force pushes.
-* **Security** (Settings > Code security): enable Dependabot alerts, secret scanning, private
-  vulnerability reporting and CodeQL "default setup" for Python.
-* Replace `<your-username>` in this README and in `pyproject.toml`.
 
 ## License
 
