@@ -49,6 +49,8 @@ from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 from . import state  # noqa: E402
 from .search import PageSearch  # noqa: E402
 from .searchbar import SearchBar  # noqa: E402
+from .helptext import as_text  # noqa: E402
+from .helpview import draw_help  # noqa: E402
 
 # ----------------------------------------------------------------- tunables
 GAP = 12  # px between pages
@@ -277,6 +279,7 @@ class Viewer(QWidget):
         self.num_timer.timeout.connect(self.commit_number)
 
         self.search = None  # PageSearch while a search is active
+        self.help = False  # the help screen (backtick) is showing
         self.s_cur = None  # (page, index) of the match we are on
         self._s_wrapped = False
         self._bar = SearchBar(self)
@@ -319,6 +322,15 @@ class Viewer(QWidget):
     def closeEvent(self, e):
         self._save_position()
         super().closeEvent(e)
+
+    # ---- help screen (helptext.py says what is on it, helpview.py draws it
+    def _toggle_help(self):
+        self.help = not self.help
+        if self.help:
+            self._bar.hide()  # the search box would sit on top of the dimmed screen
+        elif self.search is not None:
+            self._bar.show()
+        self.update()
 
     # ---- text search (search.py has the engine, searchbar.py the box at the top right)
     def close_search(self):
@@ -592,6 +604,9 @@ class Viewer(QWidget):
         p.fillRect(bar, QColor(0, 0, 0, 180))
         p.setPen(QColor(230, 230, 230))
         p.drawText(bar, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+
+        if self.help:
+            draw_help(p, QRectF(self.rect()))
 
     # ---------------------------------------------------------- navigation
     def scroll_by(self, dx, dy):
@@ -1152,6 +1167,8 @@ class Viewer(QWidget):
 
     # -------------------------------------------------------------- input
     def wheelEvent(self, e):
+        if self.help:
+            return
         d = e.angleDelta()
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.fit = None
@@ -1165,6 +1182,11 @@ class Viewer(QWidget):
         ctrl = bool(m & Qt.KeyboardModifier.ControlModifier)
         shift = bool(m & Qt.KeyboardModifier.ShiftModifier)
         vh = self.height()
+
+        if self.help:
+            if k == K.Key_Escape or t == "`" or k == K.Key_QuoteLeft:
+                self._toggle_help()
+                return
 
         if ctrl:
             if k == K.Key_D:
@@ -1213,6 +1235,8 @@ class Viewer(QWidget):
             self.cycle(-1 if shift else 1)
         elif t == "f":
             self._bar.open()
+        elif t == "`" or k == K.Key_QuoteLeft:
+            self._toggle_help()
         elif t == "n":
             self.search_step(True)
         elif t == "N":
