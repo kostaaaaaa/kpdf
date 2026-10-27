@@ -12,8 +12,8 @@ Install it once as an isolated tool; no virtualenv to activate, and `kpdf` works
 
 ```sh
 # straight from GitHub
-uv tool install git+https://github.com/<your-username>/kpdf
-# or: pipx install git+https://github.com/<your-username>/kpdf
+uv tool install git+https://github.com/kostaaaaaa/kpdf
+# or: pipx install git+https://github.com/kostaaaaaa/kpdf
 
 kpdf paper.pdf
 ```
