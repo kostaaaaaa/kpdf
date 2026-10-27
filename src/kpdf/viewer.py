@@ -45,6 +45,7 @@ from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap  # noqa: 
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from . import state  # noqa: E402
+
 # get_text("dict") embeds every raster image of the page unless told otherwise; we only need text.
 _TEXT_FLAGS = getattr(fitz, "TEXTFLAGS_TEXT", None)
 
