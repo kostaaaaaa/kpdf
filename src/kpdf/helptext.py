@@ -31,6 +31,7 @@ SECTIONS = [
             ("Ctrl-d / Ctrl-u", "half screen down / up"),
             ("Space / PageDown / PageUp", "screen down / up"),
             ("Backspace / Ctrl-o", "go back (after a link, search or jump)"),
+            ("Ctrl-\\", "navigate through other files in directory"),
         ],
     ),
     (
