@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Multimedia :: Graphics :: Viewers",
 ]
 dependencies = [
-    "pymupdf>=1.23,<2",          # 2.x imports an ONNX layout stack on import (~0.5 s slower startup)
+    "pymupdf>=2.0,<3",          # 2.x imports an ONNX layout stack on import (~0.5 s slower startup)
     "PyQt6>=6.4",
 ]
 
