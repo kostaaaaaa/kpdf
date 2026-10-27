@@ -40,6 +40,7 @@ def test_slash_selects_link_and_shows_preview(viewer):
     QTest.keyClick(viewer, Qt.Key.Key_Escape)
     assert viewer.preview is None
 
+
 def test_cycle_forward_and_back(viewer):
     QTest.keyClick(viewer, "/")
     first = viewer.sel
