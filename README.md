@@ -6,6 +6,10 @@ without leaving the page you are reading.
 
 Built with [PyMuPDF](https://pymupdf.readthedocs.io/) and [PyQt6](https://www.riverbankcomputing.com/software/pyqt/).
 
+
+## Demo
+<video src="media/demo.mp4" width="320" height="240" controls></video>
+
 ## Install
 
 Install it once as an isolated tool; no virtualenv to activate, and `kpdf` works from any directory:
@@ -32,6 +36,7 @@ Requires Python 3.12 or newer.
 | `t` / `b` | top / bottom of the current page |
 | `T` / `B` | top of first page / bottom of last page |
 | `<number>` | jump to that page (digits are buffered; `Enter` jumps now) |
+| `Ctrl-\` | open tree-sitter (same dir pdf nagivation) |
 | `J` / `K` | next / previous page |
 | `Ctrl-d` / `Ctrl-u` | half-screen down / up |
 | `Space` / `PageDown` / `PageUp` | screen down / up |
@@ -41,6 +46,7 @@ Requires Python 3.12 or newer.
 | `Enter` | follow the selected link |
 | `Backspace` / `Ctrl-o` | go back to where you were before following a link or jumping |
 | `i` | invert colours |
+| `~` | open / close help menu|
 | `q` | quit |
 
 `kpdf --help` prints the same list; `kpdf --version` prints the installed version.
@@ -48,7 +54,7 @@ Requires Python 3.12 or newer.
 ## Development
 
 ```sh
-git clone https://github.com/<your-username>/kpdf && cd kpdf
+git clone https://github.com/<kostaaaaaa>/kpdf && cd kpdf
 uv sync                    # creates .venv with the project (editable) and dev tools
 uv run kpdf some.pdf       # run from the working tree
 uv run pytest              # tests run headless (QT_QPA_PLATFORM=offscreen is set for you)
