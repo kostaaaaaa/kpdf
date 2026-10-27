@@ -15,10 +15,10 @@ jobs:
       id-token: write            # PyPI trusted publishing: no API token is stored anywhere
       contents: write            # create the GitHub Release
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0         # setuptools-scm derives the version from the tag
-      - uses: astral-sh/setup-uv@v8.1.0
+      - uses: astral-sh/setup-uv@v10.3.0
       - run: uv build
       - run: uvx twine check --strict dist/*
       - run: uv publish
