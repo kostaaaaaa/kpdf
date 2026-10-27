@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QRectF
+from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPen
 from PyQt6.QtWidgets import QWidget
 
@@ -45,8 +45,11 @@ class PdfTreeSitter(QWidget):
         folder = os.path.dirname(current)
         try:
             self.files = sorted(
-                (str(p.resolve()) for p in Path(folder).iterdir()
-                 if p.is_file() and p.suffix.lower() == ".pdf"),
+                (
+                    str(p.resolve())
+                    for p in Path(folder).iterdir()
+                    if p.is_file() and p.suffix.lower() == ".pdf"
+                ),
                 key=lambda p: os.path.basename(p).casefold(),
             )
         except OSError:
@@ -121,7 +124,9 @@ class PdfTreeSitter(QWidget):
         painter.fillRect(self.rect(), self.BACKGROUND)
         painter.setFont(QFont("monospace", 9))
         painter.setPen(self.LIGHT)
-        painter.drawText(12, 18, "PDFs in this directory  ·  h/j/k/l navigate  ·  Enter open  ·  Esc close")
+        painter.drawText(
+            12, 18, "PDFs in this directory  ·  h/j/k/l navigate  ·  Enter open  ·  Esc close"
+        )
 
         if not self.files:
             painter.setPen(self.LIGHT)
@@ -135,7 +140,9 @@ class PdfTreeSitter(QWidget):
         for index in range(self.offset, end):
             rect = QRectF(x, y, self.TILE_WIDTH, tile_h)
             selected = index == self.selected
-            painter.setPen(QPen(self.ACCENT if selected else self.TILE_BORDER, 2 if selected else 1))
+            painter.setPen(
+                QPen(self.ACCENT if selected else self.TILE_BORDER, 2 if selected else 1)
+            )
             painter.setBrush(self.SELECTED_BACKGROUND if selected else self.TILE_BACKGROUND)
             painter.drawRoundedRect(rect, 5, 5)
             name = os.path.basename(self.files[index])
@@ -153,4 +160,3 @@ class PdfTreeSitter(QWidget):
         if end < len(self.files):
             painter.setPen(self.LIGHT)
             painter.drawText(self.width() - 12, self.height() - 8, "›")
-
