@@ -13,11 +13,12 @@ Keys
   J / K          next / previous page
   Ctrl-d / u     half-screen down / up      Space / PageDown / PageUp: screen
   + / -          zoom in / out
+  f              search the text: type, Enter to run it; n / N = next / previous match
   /  and  ?      cycle forward / backward through internal links
                  (citations, figures, tables, equations, sections) and
                  show a preview of the destination.  (? is Shift+/ on US keyboards)
   Tab / Shift-Tab  same as / and ?
-  Esc            close preview (or cancel a half-typed page number)
+  Esc            close preview / search (or cancel a half-typed page number)
   Enter          follow the selected link
   Backspace / Ctrl-o   go back to where you were before following a link / jumping
   i              invert colours
@@ -34,6 +35,7 @@ import sys
 from collections import OrderedDict
 from dataclasses import dataclass
 
+# PyMuPDF 2.x imports its (unused here) ONNX layout module on `import pymupdf`, which costs ~0.5 s.
 sys.modules.setdefault("pymupdf.layout", None)
 try:
     import pymupdf as fitz
@@ -45,9 +47,8 @@ from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap  # noqa: 
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from . import state  # noqa: E402
-
-# get_text("dict") embeds every raster image of the page unless told otherwise; we only need text.
-_TEXT_FLAGS = getattr(fitz, "TEXTFLAGS_TEXT", None)
+from .search import PageSearch  # noqa: E402
+from .searchbar import SearchBar  # noqa: E402
 
 # ----------------------------------------------------------------- tunables
 GAP = 12  # px between pages
@@ -56,13 +57,10 @@ ZOOM_STEP = 1.1
 NUM_TIMEOUT_MS = 450  # wait this long for another digit of a page number
 PREVIEW_MIN_SCALE = 1.3  # previews are rendered at least this readable
 CACHE_BYTES = 512 * 1024 * 1024
-PREVIEW_CACHE_BYTES = 160 * 1024 * 1024  # rendered link previews kept for instant re-use
-DISPLAYLIST_PAGES = 6  # parsed pages kept: re-rendering them skips the content-stream parse
-PREVIEW_DELAY_MS = 20  # an uncached preview is built this long after the last keypress
-IDLE_DELAY_MS = 90  # background prefetch starts after this much quiet
-IDLE_TICK_MS = 8  # gap between background jobs
 BG = QColor(38, 38, 38)
 ACCENT = QColor(255, 190, 0)
+HIT = QColor(255, 220, 0, 95)  # search match
+HIT_CUR = QColor(255, 140, 0, 150)  # the match n / N is on
 
 EQ_ABOVE, EQ_BELOW = 16, 54  # pt shown above/below an equation anchor
 GENERIC_ABOVE, GENERIC_BELOW = 10, 130
@@ -104,7 +102,6 @@ MATH_CHARS = set(
     "\u2211\u222b\u220f\u221a\u2202\u2207\u221e\u2264\u2265\u2248\u2260\u00b1\u00d7"
     "\u2297\u2295\u27e8\u27e9\u2208\u2200\u2203\u2192\u2190\u21d2"
 )
-MATH_TEXT_RE = re.compile("[" + re.escape("".join(MATH_CHARS)) + "\u0370-\u03ff\uf000-\uf8ff]")
 REFS_RE = re.compile(
     r"^\s*(\d+\.?|[IVX]+\.?|[A-Z]\.)?\s*(references|reference list|bibliography|"
     r"literature cited|works cited)\s*:?\s*$",
@@ -265,16 +262,6 @@ class Viewer(QWidget):
         self._cols = {}
         self._refs = None
         self._refs_done = False
-        self._clips = {}  # link key -> (clip rect, kind)
-        self._failed = set()  # link keys whose preview raised once; never retried
-        self._pv = OrderedDict()  # (link key, scale) -> (QPixmap, w, h, kind, nbytes)
-        self._pv_bytes = 0
-        self._dls = OrderedDict()  # page -> DisplayList
-        self._gfx_cache = {}  # page -> [(x0, y0, x1, y1)] of images and vector drawings
-        self._fontmath = {}
-        self._font = QFont("monospace", 10)
-        self._dir = 1  # direction of the last link jump (decides what to prefetch)
-        self._warm = None  # generator that pre-analyses the pages links point to
 
         self._links = []
         self._link_iter = iter_page_links(self.doc)
@@ -288,12 +275,13 @@ class Viewer(QWidget):
         self.num_timer = QTimer(self)
         self.num_timer.setSingleShot(True)
         self.num_timer.timeout.connect(self.commit_number)
-        self.preview_timer = QTimer(self)
-        self.preview_timer.setSingleShot(True)
-        self.preview_timer.timeout.connect(self._show_selected_preview)
-        self.idle_timer = QTimer(self)
-        self.idle_timer.setSingleShot(True)
-        self.idle_timer.timeout.connect(self._idle_step)
+
+        self.search = None  # PageSearch while a search is active
+        self.s_cur = None  # (page, index) of the match we are on
+        self._s_wrapped = False
+        self._bar = SearchBar(self)
+        self._bar.submitted.connect(self._submit_search)
+        self._bar.cancelled.connect(self.close_search)
 
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
@@ -332,6 +320,112 @@ class Viewer(QWidget):
         self._save_position()
         super().closeEvent(e)
 
+    # ---- text search (search.py has the engine, searchbar.py the box at the top right)
+    def close_search(self):
+        self.search = None
+        self.s_cur = None
+        self._bar.hide()
+        self.setFocus()
+        self.update()
+
+    def _submit_search(self, text):
+        self.setFocus()  # n / N work straight away; f goes back to the box
+        text = text.strip()
+        if not text:
+            self.close_search()
+        elif self.search is not None and self.search.needle == text:
+            self.search_step(True)  # Enter on an unchanged word = next match
+        else:
+            self.search = PageSearch(self.doc, text)
+            self.s_cur = None
+            QTimer.singleShot(0, lambda s=self.search: self._pump_search(s))
+            hit = self._locate_from_view(True)
+            if hit is None:
+                self._bar.set_info("no matches", ok=False)
+                self.update()
+            else:
+                self.push_history()  # Backspace returns to where the search started
+                self._show_hit(*hit)
+
+    def _pump_search(self, s):
+        """Count the matches page by page in idle time, for the 3/12 in the box."""
+        if s is not self.search:
+            return
+        more = s.scan_next()
+        if not more or s.counted % 16 == 0:
+            self._update_search_info()
+        if more:
+            QTimer.singleShot(0, lambda: self._pump_search(s))
+
+    def _locate_from_view(self, forward):
+        p = self.page_at(self.sy)
+        return self.search.locate(p, max(0.0, (self.sy - self.tops[p]) / self.zoom), forward)
+
+    def _hit_view_rect(self, page, idx):
+        r = self.search.rects(page)[idx]
+        z = self.zoom
+        return QRectF(
+            self.page_x(page) + r.x0 * z,
+            self.tops[page] + r.y0 * z - self.sy,
+            r.width * z,
+            r.height * z,
+        )
+
+    def search_step(self, forward):
+        s = self.search
+        if s is None:
+            return
+        cur = self.s_cur
+        v = self._hit_view_rect(*cur) if cur is not None else None
+        if v is not None and v.bottom() > 0 and v.top() < self.height():
+            hit = s.step(cur[0], cur[1], forward)  # carry on from the match we are looking at
+        else:
+            hit = self._locate_from_view(forward)  # we scrolled away: search from where we are
+        if hit is None:
+            self._bar.set_info("no matches", ok=False)
+        else:
+            self._show_hit(*hit)
+
+    def _show_hit(self, page, idx, wrapped=False):
+        r = self.search.rects(page)[idx]
+        z, h = self.zoom, self.height()
+        top, bottom = self.tops[page] + r.y0 * z, self.tops[page] + r.y1 * z
+        if top < self.sy + 0.15 * h or bottom > self.sy + 0.85 * h:  # not comfortably in view
+            self.sy = (top + bottom) / 2 - h / 2
+        x0 = self.page_x(page) + r.x0 * z
+        x1 = self.page_x(page) + r.x1 * z
+        if x0 < 0 or x1 > self.width():
+            self.sx += (x0 + x1) / 2 - self.width() / 2
+        self.s_cur = (page, idx)
+        self._s_wrapped = wrapped
+        self.close_preview()
+        self.clamp()
+        self.update()
+        self._update_search_info()
+
+    def _update_search_info(self):
+        s = self.search
+        if s is None:
+            return
+        if s.done and s.total == 0:
+            self._bar.set_info("no matches", ok=False)
+            return
+        total = f"{s.total}" if s.done else f"{s.total}+"
+        n = s.ordinal(*self.s_cur) if self.s_cur is not None else None
+        text = f"{n}/{total}" if n else total
+        self._bar.set_info(text + (" wrapped" if self._s_wrapped else ""))
+
+    def _draw_hits(self, p, i, x, y):
+        z = self.zoom
+        for k, r in enumerate(self.search.rects(i)):
+            box = QRectF(x + r.x0 * z, y + r.y0 * z, r.width * z, r.height * z)
+            if self.s_cur == (i, k):
+                p.fillRect(box, HIT_CUR)
+                p.setPen(QPen(ACCENT, 1.5))
+                p.drawRect(box)
+            else:
+                p.fillRect(box, HIT)
+
     # ---- links are collected lazily: the window shows first, pages are scanned in idle time
     def _pump_links(self):
         if self._link_iter is None:
@@ -340,7 +434,6 @@ class Viewer(QWidget):
             self._links.extend(next(self._link_iter))
         except StopIteration:
             self._link_iter = None
-            self._kick_idle()
             return
         QTimer.singleShot(0, self._pump_links)
 
@@ -411,11 +504,12 @@ class Viewer(QWidget):
             self.update()
 
     def resizeEvent(self, e):
+        self._bar.place()
         self.relayout()
         if self.fit:
             self.apply_fit()
-        if self.sel_active:  # keep the old preview until the debounced rebuild lands
-            self.preview_timer.start(PREVIEW_DELAY_MS)
+        if self.sel_active:
+            self.build_preview(self.links[self.sel])
 
     # ----------------------------------------------------------- rendering
     def page_image(self, i):
@@ -426,12 +520,10 @@ class Viewer(QWidget):
             self.cache.move_to_end(key)
             return img
         s = self.zoom * dpr
-        pix = self._pixmap(i, fitz.Matrix(s, s))
-        # RGB32 is the raster engine's native opaque format: blitting it on every repaint is a
-        # plain memcpy, RGB888 has to be converted scanline by scanline each time.
+        pix = self.doc[i].get_pixmap(matrix=fitz.Matrix(s, s), alpha=False)
         img = QImage(
             pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888
-        ).convertToFormat(QImage.Format.Format_RGB32)
+        ).copy()
         img.setDevicePixelRatio(dpr)
         self.cache[key] = img
         total = sum(v.sizeInBytes() for v in self.cache.values())
@@ -460,6 +552,8 @@ class Viewer(QWidget):
                 p.drawImage(r, self.page_image(i))
                 if self.invert:
                     self._invert_rect(p, r)
+                if self.search is not None:
+                    self._draw_hits(p, i, x, y)
             i += 1
 
         link = self._links[self.sel] if 0 <= self.sel < len(self._links) else None
@@ -492,7 +586,7 @@ class Viewer(QWidget):
         if self.sel_active and link is not None:
             kind = f" {self.preview_kind}" if self.preview_kind else ""
             txt += f" link {self.sel + 1}/{len(self._links)} -> p.{link.dpage + 1}{kind} "
-        p.setFont(self._font)
+        p.setFont(QFont("monospace", 10))
         w = p.fontMetrics().horizontalAdvance(txt) + 8
         bar = QRectF(0, vh - 22, w, 22)
         p.fillRect(bar, QColor(0, 0, 0, 180))
@@ -524,7 +618,6 @@ class Viewer(QWidget):
         self.update()
 
     def close_preview(self):
-        self.preview_timer.stop()
         self.sel_active = False
         self.preview = None
         self.preview_kind = ""
@@ -604,18 +697,10 @@ class Viewer(QWidget):
             i = self.entry_link(d)
         self.sel = i
         self.sel_active = True
-        self._dir = 1 if d > 0 else -1
         L = self.links[i]
-        hit = self.cached_preview(L)
-        if hit is not None:  # instant
-            self.preview_timer.stop()
-            self.preview, self.preview_kind = hit[:3], hit[3]
-        else:  # highlight now, build the preview a moment later (also coalesces held keys)
-            self.preview, self.preview_kind = None, ""
-            self.preview_timer.start(PREVIEW_DELAY_MS)
+        self.build_preview(L)
         self.ensure_visible(L)
         self.update()
-        self._kick_idle()
 
     def ensure_visible(self, L):
         vh, vw = self.height(), self.width()
@@ -628,18 +713,11 @@ class Viewer(QWidget):
             self.sx += r.center().x() - vw / 2
             self.clamp()
             r = self.link_view_rect(L)
-        self.make_room(L)
-
-    def make_room(self, L):
-        """Scroll so that the preview fits next to the link (needs the preview's size)."""
-        if self.preview is None:
-            return
-        vh = self.height()
-        r = self.link_view_rect(L)
-        need = self.preview[2] + 14
-        if need > vh - r.bottom() and need > r.top():
-            self.sy += r.top() - 0.08 * vh
-            self.clamp()
+        if self.preview is not None:
+            need = self.preview[2] + 14
+            if need > vh - r.bottom() and need > r.top():
+                self.sy += r.top() - 0.08 * vh
+                self.clamp()
 
     def follow(self, i):
         L = self.links[i]
@@ -656,32 +734,25 @@ class Viewer(QWidget):
         """[(Rect, text)] for every text line on a page (cached)."""
         if pno not in self._lines:
             out, flags = [], []
-            page = self.doc[pno]
-            if _TEXT_FLAGS is not None:
-                blocks = page.get_text("dict", flags=_TEXT_FLAGS)["blocks"]
-            else:
-                blocks = page.get_text("dict")["blocks"]
-            for b in blocks:
+            for b in self.doc[pno].get_text("dict")["blocks"]:
                 if b.get("type") != 0:
                     continue
                 for ln in b["lines"]:
-                    spans = ln["spans"]
-                    t = "".join(s["text"] for s in spans).strip()
+                    t = "".join(s["text"] for s in ln["spans"]).strip()
                     if t:
                         out.append((fitz.Rect(ln["bbox"]), t))
                         flags.append(
-                            any(self._is_math_font(s.get("font", "")) for s in spans)
-                            or MATH_TEXT_RE.search(t) is not None
+                            any(MATH_FONT_RE.search(s.get("font", "")) for s in ln["spans"])
+                            or any(
+                                c in MATH_CHARS
+                                or "\u0370" <= c <= "\u03ff"
+                                or "\uf000" <= c <= "\uf8ff"
+                                for c in t
+                            )
                         )
             self._lines[pno] = out
             self._mathflag[pno] = flags
         return self._lines[pno]
-
-    def _is_math_font(self, name):
-        r = self._fontmath.get(name)
-        if r is None:
-            r = self._fontmath[name] = MATH_FONT_RE.search(name) is not None
-        return r
 
     def refs_start(self):
         """(page, y) of the last 'References' heading in the document, or None."""
@@ -722,19 +793,11 @@ class Viewer(QWidget):
         cross = len(long_) - len(left) - len(right)
         return "two" if len(left) >= 5 and len(right) >= 5 and cross < 0.3 * len(long_) else "one"
 
-    def _doc_two_column_steps(self):
-        """Generator: votes on the document layout one sampled page at a time."""
-        votes = []
-        for p in range(0, self.n, max(1, self.n // 12)):
-            votes.append(self._page_layout(p))
-            yield
-        votes = [v for v in votes if v]
-        self._two = votes.count("two") * 2 > len(votes)
-
     def _doc_two_column(self):
         if not hasattr(self, "_two"):
-            for _ in self._doc_two_column_steps():
-                pass
+            votes = [self._page_layout(p) for p in range(0, self.n, max(1, self.n // 12))]
+            votes = [v for v in votes if v]
+            self._two = votes.count("two") * 2 > len(votes)
         return self._two
 
     def columns(self, pno):
@@ -869,7 +932,8 @@ class Viewer(QWidget):
 
     def float_rect(self, pno, d):
         """Rect of the figure/table whose caption is near the anchor, or None."""
-        P = self.doc[pno].rect
+        page = self.doc[pno]
+        P = page.rect
         cap = self.find_caption(pno, d, 40) or self.find_caption(pno, d, 520)
         if cap is None:
             return None
@@ -886,26 +950,27 @@ class Viewer(QWidget):
                 region = _union(region, r)
         cap_rect = fitz.Rect(region)
 
-        pool = list(self._gfx(pno))  # (x0, y0, x1, y1) tuples, cached per page
-        rx0, ry0, rx1, ry1 = region
-        used, changed = 0, True
-        while changed:  # grow the region over every graphic that touches it
-            changed, rest = False, []
-            for g in pool:
-                gx0, gy0, gx1, gy1 = g
-                ox = min(gx1, rx1) - max(gx0, rx0)
-                if (
-                    ox >= 0.2 * min(max(gx1 - gx0, 1.0), max(rx1 - rx0, 0.0))
-                    and max(gy0 - ry1, ry0 - gy1, 0.0) <= 40
-                ):
-                    rx0, ry0, rx1, ry1 = min(rx0, gx0), min(ry0, gy0), max(rx1, gx1), max(ry1, gy1)
-                    used += 1
+        gr = []
+        with contextlib.suppress(Exception):
+            gr += [fitz.Rect(im["bbox"]) for im in page.get_image_info()]
+        with contextlib.suppress(Exception):
+            gr += [fitz.Rect(dr["rect"]) for dr in page.get_drawings()]
+        gr = [g for g in gr if not (g.width > 0.95 * P.width and g.height > 0.8 * P.height)]
+
+        def touches(g, reg):
+            ox = min(g.x1, reg.x1) - max(g.x0, reg.x0)
+            if ox < 0.2 * min(max(g.width, 1.0), reg.width):
+                return False
+            return max(g.y0 - reg.y1, reg.y0 - g.y1, 0) <= 40
+
+        used, changed = set(), True
+        while changed:
+            changed = False
+            for i, g in enumerate(gr):
+                if i not in used and touches(g, region):
+                    region = _union(region, g)
+                    used.add(i)
                     changed = True
-                else:
-                    rest.append(g)
-            pool = rest
-        if used:
-            region = fitz.Rect(rx0, ry0, rx1, ry1)
 
         if not used:  # nothing graphical found: guess by caption type
             first = next((t for r, t in lines if abs(r.y0 - cap.y0) < 0.5), "")
@@ -1065,174 +1130,28 @@ class Viewer(QWidget):
             clip = fitz.Rect(P.x0, max(d.y - 20, 0), P.x1, min(d.y + 150, P.y1))
         return clip, kind
 
-    # ------------------------------------------------- preview cache / prefetch
-    @staticmethod
-    def _link_key(L):
-        """Links that point at the same thing with the same text share clip and preview."""
-        return (L.dpage, round(L.dest.x, 1), round(L.dest.y, 1), L.name, L.text)
-
-    def _preview_scale(self, clip):
-        s = max(self.zoom, PREVIEW_MIN_SCALE)
-        s = min(s, self.width() * 0.92 / clip.width, self.height() * 0.65 / clip.height)
-        return max(s, 0.4)
-
-    def cached_preview(self, L):
-        """-> (QPixmap, logical_w, logical_h, kind, nbytes) if already rendered, else None."""
-        key = self._link_key(L)
-        ck = self._clips.get(key)
-        if not ck:
-            return None
-        pk = (key, round(self._preview_scale(ck[0]) * self.devicePixelRatioF(), 3))
-        hit = self._pv.get(pk)
-        if hit is not None:
-            self._pv.move_to_end(pk)
-        return hit
-
-    def make_preview(self, L):
-        """Cached preview of a link's destination, rendering it if needed (None on failure).
-        Touches no widget state, so it can serve both the selected link and the prefetcher."""
-        hit = self.cached_preview(L)
-        if hit is not None:
-            return hit
-        key = self._link_key(L)
-        if key in self._failed:
-            return None
+    def build_preview(self, L):
         try:
-            ck = self._clips.get(key)
-            if ck is None:
-                ck = self._clips[key] = self.compute_clip(L)
-            clip, kind = ck
+            clip, self.preview_kind = self.compute_clip(L)
             dpr = self.devicePixelRatioF()
-            s = self._preview_scale(clip)
-            pix = self._pixmap(L.dpage, fitz.Matrix(s * dpr, s * dpr), clip)
-            # fromImage() copies, and `pix` outlives the QImage view of its buffer
-            qp = QPixmap.fromImage(
-                QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888)
+            s = max(self.zoom, PREVIEW_MIN_SCALE)
+            s = min(s, self.width() * 0.92 / clip.width, self.height() * 0.65 / clip.height)
+            s = max(s, 0.4)
+            pix = self.doc[L.dpage].get_pixmap(
+                matrix=fitz.Matrix(s * dpr, s * dpr), clip=clip, alpha=False
             )
+            img = QImage(
+                pix.samples, pix.width, pix.height, pix.stride, QImage.Format.Format_RGB888
+            ).copy()
+            qp = QPixmap.fromImage(img)
             qp.setDevicePixelRatio(dpr)
-            out = (qp, pix.width / dpr, pix.height / dpr, kind, qp.width() * qp.height() * 4)
+            self.preview = (qp, pix.width / dpr, pix.height / dpr)
         except Exception as ex:  # never crash the viewer over a preview
             print(f"preview failed: {ex!r}", file=sys.stderr)
-            self._failed.add(key)
-            return None
-        self._pv[(key, round(s * dpr, 3))] = out
-        self._pv_bytes += out[4]
-        while self._pv_bytes > PREVIEW_CACHE_BYTES and len(self._pv) > 1:
-            _, old = self._pv.popitem(last=False)
-            self._pv_bytes -= old[4]
-        return out
-
-    def _show_selected_preview(self):
-        """Timer slot: build (or fetch) the preview of the selected link and show it."""
-        if not self.sel_active or not 0 <= self.sel < len(self._links):
-            return
-        L = self._links[self.sel]
-        out = self.make_preview(L)
-        self.preview, self.preview_kind = (out[:3], out[3]) if out else (None, "")
-        self.make_room(L)
-        self.update()
-        self._kick_idle()
-
-    def _pixmap(self, pno, matrix, clip=None):
-        """Render a page or a clip of it through a cached display list: the content stream is
-        parsed once per page, and a clipped render replays only what intersects the clip."""
-        try:
-            dl = self._dls.get(pno)
-            if dl is None:
-                dl = self._dls[pno] = self.doc[pno].get_displaylist()
-                while len(self._dls) > DISPLAYLIST_PAGES:
-                    self._dls.popitem(last=False)
-            else:
-                self._dls.move_to_end(pno)
-            return dl.get_pixmap(matrix=matrix, clip=clip, alpha=False)
-        except Exception:
-            return self.doc[pno].get_pixmap(matrix=matrix, clip=clip, alpha=False)
-
-    def _gfx(self, pno):
-        """(x0, y0, x1, y1) of every image and vector drawing on a page (cached).
-
-        get_drawings() builds Python objects per path (slow on plot pages); get_cdrawings()
-        returns plain tuples."""
-        g = self._gfx_cache.get(pno)
-        if g is None:
-            page = self.doc[pno]
-            P = page.rect
-            boxes = []
-            with contextlib.suppress(Exception):
-                boxes += [tuple(im["bbox"]) for im in page.get_image_info()]
-            with contextlib.suppress(Exception):
-                fn = getattr(page, "get_cdrawings", None) or page.get_drawings
-                boxes += [tuple(dr["rect"]) for dr in fn()]
-            g = self._gfx_cache[pno] = [
-                b
-                for b in boxes
-                if _finite(*b)
-                and not (b[2] - b[0] > 0.95 * P.width and b[3] - b[1] > 0.8 * P.height)
-            ]
-        return g
-
-    # ----------------------------------------------------- background work
-    # Everything runs on the GUI thread (a PyMuPDF document must not be shared between threads),
-    # so the work is cut into small jobs that only start after IDLE_DELAY_MS without input.
-    def _kick_idle(self, delay=IDLE_DELAY_MS):
-        self.idle_timer.start(delay)
-
-    def _idle_step(self):
-        if self._link_iter is not None:  # the link scan owns idle time until it finishes
-            return
-        try:
-            if self._job_neighbour_previews() or self._job_neighbour_pages() or self._job_warm():
-                self.idle_timer.start(IDLE_TICK_MS)
-        except Exception as ex:  # a failing prefetch must never take the viewer down
-            print(f"prefetch failed: {ex!r}", file=sys.stderr)
-
-    def _job_neighbour_previews(self):
-        """Render the previews the next / previous "/" press will want."""
-        if not self.sel_active or not self._links:
-            return False
-        n = len(self._links)
-        for off in (self._dir, -self._dir, 2 * self._dir):
-            L = self._links[(self.sel + off) % n]
-            if self._link_key(L) not in self._failed and self.cached_preview(L) is None:
-                self.make_preview(L)
-                return True
-        return False
-
-    def _job_neighbour_pages(self):
-        """Render the pages around the current one so scrolling onto them does not stall."""
-        cur, key = self.current_page(), round(self.zoom * self.devicePixelRatioF(), 4)
-        for p in (cur, cur + 1, cur - 1, cur + 2):
-            if 0 <= p < self.n and (p, key) not in self.cache:
-                self.page_image(p)
-                return True
-        return False
-
-    def _warm_steps(self):
-        """Generator: pre-analyses the pages links point to, one small step at a time."""
-        self.refs_start()
-        yield
-        if not hasattr(self, "_two"):
-            yield from self._doc_two_column_steps()
-        cur = self.current_page()
-        for p in sorted({L.dpage for L in self._links}, key=lambda q: (abs(q - cur), q)):
-            self.columns(p)  # extracts the page's text lines
-            yield
-            if any(CAP_RE.match(t) for _, t in self.lines_of(p)):
-                self._gfx(p)  # figure pages: the slow part of a figure preview
-                yield
-
-    def _job_warm(self):
-        if self._warm is None:
-            self._warm = self._warm_steps()
-        try:
-            next(self._warm)
-        except StopIteration:
-            return False
-        return True
+            self.preview = None
 
     # -------------------------------------------------------------- input
     def wheelEvent(self, e):
-        self._kick_idle()
         d = e.angleDelta()
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.fit = None
@@ -1241,7 +1160,6 @@ class Viewer(QWidget):
             self.scroll_by(-d.x() * 0.6, -d.y() * 0.6)
 
     def keyPressEvent(self, e):
-        self._kick_idle()
         k, m, t = e.key(), e.modifiers(), e.text()
         K = Qt.Key
         ctrl = bool(m & Qt.KeyboardModifier.ControlModifier)
@@ -1274,8 +1192,10 @@ class Viewer(QWidget):
             if self.num:
                 self.num = ""
                 self.num_timer.stop()
-            else:
+            elif self.sel_active or self.search is None:
                 self.close_preview()
+            else:
+                self.close_search()
             self.update()
         elif k == K.Key_Backspace:
             self.go_back()
@@ -1291,6 +1211,12 @@ class Viewer(QWidget):
             self.cycle(-1)
         elif t == "/" or k == K.Key_Slash:
             self.cycle(-1 if shift else 1)
+        elif t == "f":
+            self._bar.open()
+        elif t == "n":
+            self.search_step(True)
+        elif t == "N":
+            self.search_step(False)
         elif t == "j":
             self.scroll_by(0, STEP)
         elif t == "k":
