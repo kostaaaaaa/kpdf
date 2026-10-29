@@ -22,6 +22,7 @@ Keys
   Enter          follow the selected link
   Backspace / Ctrl-o   go back to where you were before following a link / jumping
   i              invert colours
+  p              presentation mode: fullscreen, one slide at a time, size locked
   Ctrl-\\      toggle the bottom PDF hotbar; h/j/k/l select, Enter opens
   q              quit
 """
@@ -244,6 +245,11 @@ def collect_links(doc):
 
 # ------------------------------------------------------------------ viewer
 class Viewer(QWidget):
+    presenting = False  # presentation mode (p): fullscreen, one slide at a time, size locked
+    slide = 0  # the slide on screen while presenting
+    _wheel = 0.0  # wheel delta collected towards one slide flip
+    _leave_page = None  # page to put back at the top once the window is restored to its size
+
     def __init__(self, path):
         super().__init__()
         self.path = path
@@ -373,6 +379,8 @@ class Viewer(QWidget):
         state.save(self.path, state.Position(i, min(max(frac, 0.0), 1.0), fit))
 
     def closeEvent(self, e):
+        if self.presenting:
+            self._leave_presentation(restore_window=False)  # so the saved position is a normal one
         self._save_position()
         super().closeEvent(e)
 
@@ -384,6 +392,91 @@ class Viewer(QWidget):
         elif self.search is not None:
             self._bar.show()
         self.update()
+
+    # ---- presentation mode (p): zen / fullscreen, one slide at a time, nothing to resize
+    def toggle_presentation(self):
+        if self.presenting:
+            self._leave_presentation()
+        else:
+            self._enter_presentation()
+
+    def _enter_presentation(self):
+        hotbar = getattr(self, "tree_sitter", None)
+        if hotbar is not None and hotbar.isVisible():
+            hotbar.hide()  # the PDF hotbar is not available while presenting
+            self.setFocus()
+        self._pres_saved = (self.fit, self.zoom, self.history, self.isMaximized())
+        self.history = []  # while presenting, history is a list of slide numbers
+        self.close_preview()
+        self.slide = self.current_page()
+        self.presenting = True
+        self.fit = "p"
+        self.setCursor(Qt.CursorShape.BlankCursor)
+        self.showFullScreen()
+        self.show_slide(self.slide, push=False)  # the resize that follows refits to the real size
+
+    def _leave_presentation(self, restore_window=True):
+        fit, zoom, history, was_maximized = self._pres_saved
+        page = self.slide
+        self.presenting = False
+        self.history = history
+        self.close_preview()
+        self.unsetCursor()
+        if restore_window:
+            if was_maximized:
+                self.showMaximized()
+            else:
+                self.showNormal()
+        self.fit = fit
+        if fit:
+            self.apply_fit()
+        else:
+            self.zoom = zoom
+            self.relayout()
+        self.goto_page(page, push=False)
+        if restore_window:
+            # the window is resized a moment later and a resize re-anchors on the window centre,
+            # so put the page back at the top again then (for a short while only)
+            self._leave_page = page
+            QTimer.singleShot(500, self._forget_leave_page)
+
+    def _forget_leave_page(self):
+        self._leave_page = None
+
+    def _slide_zoom(self, i):
+        pw, ph = self.sizes[i]
+        return min(self.width() / pw, self.height() / ph)
+
+    def show_slide(self, i, push=True):
+        i = min(max(i, 0), self.n - 1)
+        if push and i != self.slide:
+            self.push_history()
+        self.close_preview()
+        self.slide = i
+        self.zoom = self._slide_zoom(i)
+        self.relayout()
+        self.update()
+
+    def _presentation_key(self, k, t, shift):
+        """Keys that mean something else while presenting. True = handled here."""
+        K = Qt.Key
+        if (
+            t in ("j", "l", "J")
+            or k in (K.Key_PageDown, K.Key_Right, K.Key_Down)
+            or (k == K.Key_Space and not shift)
+        ):
+            self.show_slide(self.slide + 1, push=False)
+        elif (
+            t in ("k", "h", "K")
+            or k in (K.Key_PageUp, K.Key_Left, K.Key_Up)
+            or (k == K.Key_Space and shift)
+        ):
+            self.show_slide(self.slide - 1, push=False)
+        elif t in ("w", "s", "+", "=", "-"):
+            pass  # the size is locked while presenting
+        else:
+            return False
+        return True
 
     # ---- text search (search.py has the engine, searchbar.py the box at the top right)
     def close_search(self):
@@ -423,6 +516,8 @@ class Viewer(QWidget):
             QTimer.singleShot(0, lambda: self._pump_search(s))
 
     def _locate_from_view(self, forward):
+        if self.presenting:
+            return self.search.locate(self.slide, 0.0, forward)
         p = self.page_at(self.sy)
         return self.search.locate(p, max(0.0, (self.sy - self.tops[p]) / self.zoom), forward)
 
@@ -452,6 +547,8 @@ class Viewer(QWidget):
             self._show_hit(*hit)
 
     def _show_hit(self, page, idx, wrapped=False):
+        if self.presenting:
+            self.show_slide(page, push=False)
         r = self.search.rects(page)[idx]
         z, h = self.zoom, self.height()
         top, bottom = self.tops[page] + r.y0 * z, self.tops[page] + r.y1 * z
@@ -527,6 +624,11 @@ class Viewer(QWidget):
         self.clamp()
 
     def clamp(self):
+        if self.presenting:  # nothing scrolls: the slide always sits centred in the window
+            i = self.slide
+            self.sy = self.tops[i] - (self.height() - self.sizes[i][1] * self.zoom) / 2
+            self.sx = (self.content_w - self.width()) / 2
+            return
         self.sy = min(max(self.sy, 0.0), max(0.0, self.total_h - self.height()))
         self.sx = min(max(self.sx, 0.0), max(0.0, self.content_w - self.width()))
 
@@ -567,6 +669,8 @@ class Viewer(QWidget):
             self.sy = self.tops[i] - (self.height() - self.sizes[i][1] * self.zoom) / 2
             self.clamp()
             self.update()
+        elif self.fit == "p":
+            self.show_slide(self.slide, push=False)
 
     def resizeEvent(self, e):
         self._bar.place()
@@ -577,6 +681,8 @@ class Viewer(QWidget):
             self.apply_fit()
         if self.sel_active:
             self.build_preview(self.links[self.sel])
+        if self._leave_page is not None:
+            self.goto_page(self._leave_page, push=False)
 
     # ----------------------------------------------------------- rendering
     def page_image(self, i):
@@ -607,11 +713,14 @@ class Viewer(QWidget):
 
     def paintEvent(self, ev):
         p = QPainter(self)
-        p.fillRect(self.rect(), BG)
+        p.fillRect(self.rect(), QColor(0, 0, 0) if self.presenting else BG)
         vw, vh = self.width(), self.height()
 
         i = self.page_at(self.sy)
         while i < self.n and self.tops[i] - self.sy < vh:
+            if self.presenting and i != self.slide:  # one slide at a time
+                i += 1
+                continue
             pw, ph = self.sizes[i][0] * self.zoom, self.sizes[i][1] * self.zoom
             x, y = self.page_x(i), self.tops[i] - self.sy
             if y + ph > 0 and x + pw > 0 and x < vw:
@@ -653,12 +762,15 @@ class Viewer(QWidget):
         if self.sel_active and link is not None:
             kind = f" {self.preview_kind}" if self.preview_kind else ""
             txt += f" link {self.sel + 1}/{len(self._links)} -> p.{link.dpage + 1}{kind} "
-        p.setFont(QFont("monospace", 10))
-        w = p.fontMetrics().horizontalAdvance(txt) + 8
-        bar = QRectF(0, vh - 22, w, 22)
-        p.fillRect(bar, QColor(0, 0, 0, 180))
-        p.setPen(QColor(230, 230, 230))
-        p.drawText(bar, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
+        if self.presenting:  # zen: only a page number being typed is shown
+            txt = f" :{self.num} " if self.num else ""
+        if txt:
+            p.setFont(QFont("monospace", 10))
+            w = p.fontMetrics().horizontalAdvance(txt) + 8
+            bar = QRectF(0, vh - 22, w, 22)
+            p.fillRect(bar, QColor(0, 0, 0, 180))
+            p.setPen(QColor(230, 230, 230))
+            p.drawText(bar, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, txt)
 
         if self.help:
             draw_help(p, QRectF(self.rect()))
@@ -671,10 +783,15 @@ class Viewer(QWidget):
         self.update()
 
     def push_history(self):
-        self.history.append((self.zoom, self.sx, self.sy))
+        # while presenting, history is a list of slide numbers (the normal one is put aside)
+        self.history.append(self.slide if self.presenting else (self.zoom, self.sx, self.sy))
         del self.history[:-100]
 
     def go_back(self):
+        if self.presenting:
+            if self.history:
+                self.show_slide(self.history.pop(), push=False)
+            return
         if not self.history:
             return
         z, sx, sy = self.history.pop()
@@ -694,6 +811,9 @@ class Viewer(QWidget):
 
     def goto_page(self, p, push=True):
         p = min(max(p, 0), self.n - 1)
+        if self.presenting:
+            self.show_slide(p, push=push)
+            return
         if push:
             self.push_history()
         self.close_preview()
@@ -761,7 +881,15 @@ class Viewer(QWidget):
     def cycle(self, d):
         if not self.links:
             return
-        if self.sel >= 0 and self.link_visible(self.sel):
+        if self.presenting:  # only the links on the slide being shown
+            here = [i for i, L in enumerate(self.links) if L.page == self.slide]
+            if not here:
+                return
+            if self.sel in here:
+                i = here[(here.index(self.sel) + d) % len(here)]
+            else:
+                i = here[0] if d > 0 else here[-1]
+        elif self.sel >= 0 and self.link_visible(self.sel):
             i = (self.sel + d) % len(self.links)
         else:
             i = self.entry_link(d)
@@ -769,7 +897,8 @@ class Viewer(QWidget):
         self.sel_active = True
         L = self.links[i]
         self.build_preview(L)
-        self.ensure_visible(L)
+        if not self.presenting:
+            self.ensure_visible(L)
         self.update()
 
     def ensure_visible(self, L):
@@ -793,6 +922,9 @@ class Viewer(QWidget):
         L = self.links[i]
         self.push_history()
         self.close_preview()
+        if self.presenting:
+            self.show_slide(L.dpage, push=False)
+            return
         h = self.sizes[L.dpage][1]
         y = min(max(L.dest.y, 0), h)
         self.sy = self.tops[L.dpage] + y * self.zoom - 0.2 * self.height()
@@ -1225,6 +1357,13 @@ class Viewer(QWidget):
         if self.help:
             return
         d = e.angleDelta()
+        if self.presenting:  # a wheel notch flips one slide; zooming is locked
+            if not e.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                self._wheel += d.y()
+                if abs(self._wheel) >= 120:
+                    self.show_slide(self.slide + (1 if self._wheel < 0 else -1), push=False)
+                    self._wheel = 0.0
+            return
         if e.modifiers() & Qt.KeyboardModifier.ControlModifier:
             self.fit = None
             self.set_zoom(self.zoom * (ZOOM_STEP if d.y() > 0 else 1 / ZOOM_STEP))
@@ -1243,7 +1382,8 @@ class Viewer(QWidget):
             return
 
         if ctrl and k == K.Key_Backslash:
-            self.tree_sitter.toggle()
+            if not self.presenting:  # the PDF hotbar is not available while presenting
+                self.tree_sitter.toggle()
             return
 
         if ctrl:
@@ -1262,6 +1402,9 @@ class Viewer(QWidget):
             return
         if self.num and k not in (K.Key_Escape, K.Key_Return, K.Key_Enter):
             self.commit_number()
+
+        if self.presenting and self._presentation_key(k, t, shift):
+            return
 
         if k in (K.Key_Return, K.Key_Enter):
             if self.num:
@@ -1335,6 +1478,8 @@ class Viewer(QWidget):
         elif t == "i":
             self.invert = not self.invert
             self.update()
+        elif t == "p":
+            self.toggle_presentation()
         elif t == "q":
             self.close()
 
