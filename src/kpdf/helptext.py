@@ -31,7 +31,6 @@ SECTIONS = [
             ("Ctrl-d / Ctrl-u", "half screen down / up"),
             ("Space / PageDown / PageUp", "screen down / up"),
             ("Backspace / Ctrl-o", "go back (after a link, search or jump)"),
-            ("Ctrl-\\", "navigate through other files in directory"),
         ],
     ),
     (
@@ -57,6 +56,21 @@ SECTIONS = [
             ("f", "open the search box; Enter runs it"),
             ("n / N", "next / previous match"),
             ("Esc", "leave the search"),
+        ],
+    ),
+    (
+        "Presentation",
+        [
+            ("p", "toggle presentation mode (fullscreen, one slide at a time)"),
+            ("j l J Space", "next slide"),
+            ("k h K PageUp", "previous slide"),
+            ("w s + -", "locked while presenting: the size never changes"),
+        ],
+    ),
+    (
+        "Files",
+        [
+            ("Ctrl-\\", "show / hide the PDF hotbar; h j k l select, Enter opens"),
         ],
     ),
     (
