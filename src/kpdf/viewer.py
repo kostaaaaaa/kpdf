@@ -44,7 +44,7 @@ try:
 except ImportError:  # older PyMuPDF versions
     import fitz
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, QTimer  # noqa: E402
+from PyQt6.QtCore import QFileSystemWatcher, QPointF, QRectF, Qt, QTimer  # noqa: E402
 from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
@@ -65,6 +65,11 @@ BG = QColor(38, 38, 38)
 ACCENT = QColor(255, 190, 0)
 HIT = QColor(255, 220, 0, 95)  # search match
 HIT_CUR = QColor(255, 140, 0, 150)  # the match n / N is on
+
+# live reload (a recompile rewrites the PDF; the viewer picks the new copy up by itself)
+RELOAD_DEBOUNCE_MS = 150  # wait for the burst of file events a compile produces to settle
+RELOAD_RETRY_MS = 250  # re-check interval while the file is still being written
+RELOAD_MAX_TRIES = 60  # ~15 s of waiting, then give up until the next file event
 
 EQ_ABOVE, EQ_BELOW = 16, 54  # pt shown above/below an equation anchor
 GENERIC_ABOVE, GENERIC_BELOW = 10, 130
@@ -111,6 +116,31 @@ REFS_RE = re.compile(
     r"literature cited|works cited)\s*:?\s*$",
     re.I,
 )
+
+
+# -------------------------------------------------------------- file access
+def file_sig(path):
+    """(mtime_ns, size) of a file, or None if it is not there (e.g. latexmk is mid-replace)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def read_pdf(path, require_eof=False):
+    """Open a PDF from a private in-memory copy.
+
+    MuPDF reads lazily from disk, so a document opened by path would start rendering garbage the
+    moment a compile rewrites the file under it.  With require_eof, a file that does not end in
+    %%EOF (a compile is still writing it) is rejected instead of being silently 'repaired' into a
+    PDF with missing pages.
+    """
+    with open(path, "rb") as f:
+        data = f.read()
+    if require_eof and b"%%EOF" not in data[-2048:]:
+        raise ValueError("PDF is still being written")
+    return fitz.open(stream=data, filetype="pdf")
 
 
 # ------------------------------------------------------------------- links
@@ -253,7 +283,8 @@ class Viewer(QWidget):
     def __init__(self, path):
         super().__init__()
         self.path = path
-        self.doc = fitz.open(path)
+        self._sig = file_sig(path)  # taken first: a change while we read is caught by the watcher
+        self.doc = read_pdf(path)
         if self.doc.needs_pass:
             raise SystemExit("Encrypted PDFs are not supported.")
         self.n = self.doc.page_count
@@ -302,13 +333,15 @@ class Viewer(QWidget):
         self.apply_fit()
         self._restore_position()
         self.tree_sitter = PdfTreeSitter(self)
+        self._init_watch()
 
     def open_pdf(self, path):
         """Replace the current PDF in this window, preserving the viewer instance."""
         path = os.path.abspath(os.path.expanduser(path))
         if path == os.path.abspath(self.path):
             return
-        new_doc = fitz.open(path)
+        new_sig = file_sig(path)
+        new_doc = read_pdf(path)
         if new_doc.needs_pass:
             new_doc.close()
             print("kpdf: encrypted PDFs are not supported", file=sys.stderr)
@@ -322,6 +355,7 @@ class Viewer(QWidget):
         old_doc = self.doc
         self.doc = new_doc
         self.path = path
+        self._sig = new_sig
         self.n = self.doc.page_count
         self.sizes = [(self.doc[i].rect.width, self.doc[i].rect.height) for i in range(self.n)]
         self.zoom = 1.0
@@ -334,6 +368,7 @@ class Viewer(QWidget):
         self._cols.clear()
         self._refs = None
         self._refs_done = False
+        self.__dict__.pop("_two", None)
         self._links = []
         self._link_iter = iter_page_links(self.doc)
         QTimer.singleShot(0, self._pump_links)
@@ -350,8 +385,116 @@ class Viewer(QWidget):
         self.apply_fit()
         self._restore_position()
         old_doc.close()
+        self._watch_path()
         if hasattr(self, "tree_sitter"):
             self.tree_sitter.refresh()
+        self.update()
+
+    # ---- live reload: latexmk / vimtex rewrite the PDF, we notice and swap the new copy in
+    def _init_watch(self):
+        self._watcher = QFileSystemWatcher(self)
+        self._watcher.fileChanged.connect(self._on_pdf_event)
+        self._watcher.directoryChanged.connect(self._on_pdf_event)
+        self._reload_timer = QTimer(self)
+        self._reload_timer.setSingleShot(True)
+        self._reload_timer.timeout.connect(self._check_reload)
+        self._pending_sig = None  # signature seen at the previous look (still changing if it moves)
+        self._reload_tries = 0
+        self._watch_path()
+
+    def _watch_path(self):
+        """Watch the PDF and its folder.  The folder catches a compile that replaces the file
+        (rename / delete + create), which silently drops a file-only watch."""
+        w = self._watcher
+        old = w.files() + w.directories()
+        if old:
+            w.removePaths(old)
+        p = os.path.abspath(self.path)
+        w.addPath(os.path.dirname(p))
+        w.addPath(p)
+        self._pending_sig = None
+
+    def _on_pdf_event(self, _path=""):
+        p = os.path.abspath(self.path)
+        if p not in self._watcher.files() and os.path.exists(p):
+            self._watcher.addPath(p)  # the file was replaced: watch the new one
+        self._reload_tries = 0
+        self._reload_timer.start(RELOAD_DEBOUNCE_MS)  # restarts: one check per burst of events
+
+    def _retry_reload(self):
+        self._reload_tries += 1
+        if self._reload_tries < RELOAD_MAX_TRIES:
+            self._reload_timer.start(RELOAD_RETRY_MS)
+        else:
+            self._pending_sig = None
+            print("kpdf: gave up waiting for the PDF to become readable", file=sys.stderr)
+
+    def _check_reload(self):
+        sig = file_sig(self.path)
+        if sig is None or sig == self._sig:
+            self._pending_sig = None  # gone for a moment, or nothing new; the next event retries
+            return
+        if sig != self._pending_sig:  # still changing: reload once two looks in a row agree
+            self._pending_sig = sig
+            self._retry_reload()
+            return
+        try:
+            new_doc = read_pdf(self.path, require_eof=True)
+            if file_sig(self.path) != sig:  # modified while we were reading it
+                new_doc.close()
+                raise ValueError("PDF changed while reading")
+        except Exception:
+            self._retry_reload()
+            return
+        self._pending_sig = None
+        self._sig = sig
+        self.reload_document(new_doc)
+
+    def reload_document(self, new_doc):
+        """Swap in a freshly compiled copy of the same PDF, keeping the view where it was."""
+        if new_doc.needs_pass or new_doc.page_count == 0:
+            new_doc.close()
+            return
+        # anchor on the page and the fraction of it at the window centre, as _save_position does
+        cy = self.sy + self.height() / 2
+        anchor = self.page_at(cy)
+        frac = (cy - self.tops[anchor]) / (self.sizes[anchor][1] * self.zoom)
+
+        old_doc, old_sizes = self.doc, self.sizes
+        self.doc = new_doc
+        self.n = new_doc.page_count
+        self.sizes = [(new_doc[i].rect.width, new_doc[i].rect.height) for i in range(self.n)]
+        self.cache.clear()
+        self._lines.clear()
+        self._mathflag.clear()
+        self._cols.clear()
+        self._refs = None
+        self._refs_done = False
+        self.__dict__.pop("_two", None)  # the cached one/two-column verdict
+        self._links = []
+        self._link_iter = iter_page_links(self.doc)
+        QTimer.singleShot(0, self._pump_links)
+        self.sel = -1  # link indices mean nothing in the new document
+        self.close_preview()
+
+        if self.presenting:
+            self.slide = min(self.slide, self.n - 1)
+            self.show_slide(self.slide, push=False)
+        else:
+            self.relayout()
+            i = min(anchor, self.n - 1)
+            self.sy = self.tops[i] + frac * self.sizes[i][1] * self.zoom - self.height() / 2
+            self.clamp()
+            if self.fit in ("w", "s") and self.sizes != old_sizes:
+                self.apply_fit()  # page size changed: refit, otherwise leave the zoom alone
+
+        if self.search is not None:  # the old engine holds the old document: search again
+            needle = self.search.needle
+            self.search = PageSearch(self.doc, needle)
+            self.s_cur = None
+            self._s_wrapped = False
+            QTimer.singleShot(0, lambda s=self.search: self._pump_search(s))
+        old_doc.close()
         self.update()
 
     # ---- resume position (see state.py): three numbers per PDF, saved on close
