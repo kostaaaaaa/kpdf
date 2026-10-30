@@ -1,6 +1,6 @@
 """Draws the help screen (see helptext.py for what it says) over the viewer."""
 
-from functools import lru_cache
+from functools import cache, lru_cache
 from typing import NamedTuple
 
 from PyQt6.QtCore import QPointF, QRectF
@@ -39,7 +39,7 @@ def _content():
     return helptext.build()
 
 
-@lru_cache(maxsize=None)
+@cache
 def _metrics(px: int):
     """(font, char width, line height, ascent) at a pixel size.
 
