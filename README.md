@@ -23,32 +23,71 @@ On Arch Linux: `sudo pacman -S uv` (or `python-pipx`), then make sure `~/.local/
 
 Requires Python 3.12 or newer.
 
-## Keys
+### Navigation
 
 | Key | Action |
 | --- | --- |
 | `h` `j` `k` `l` | scroll left / down / up / right |
-| `w` / `s` | fit width / fit height |
-| `t` / `b` | top / bottom of the current page |
-| `T` / `B` | top of first page / bottom of last page |
-| `<number>` | jump to that page (digits are buffered; `Enter` jumps now) |
 | `J` / `K` | next / previous page |
-| `Ctrl-d` / `Ctrl-u` | half-screen down / up |
+| `t` / `b` | top / bottom of the current page |
+| `T` / `B` | top of first / bottom of last page |
+| `<number>` | jump to that page (`Enter` jumps now) |
+| `Ctrl-d` / `Ctrl-u` | half screen down / up |
 | `Space` / `PageDown` / `PageUp` | screen down / up |
-| `+` / `-` | zoom in / out |
-| `/` and `?` (or `Tab` / `Shift-Tab`) | cycle forward / backward through internal links and preview the destination |
-| `Esc` | close the preview (or cancel a half-typed page number) |
-| `Enter` | follow the selected link |
-| `Backspace` / `Ctrl-o` | go back to where you were before following a link or jumping |
-| `i` | invert colours |
-| `q` | quit |
+| `Backspace` / `Ctrl-o` | go back (after a link, search or jump) |
 
+### View
+
+| Key | Action |
+| --- | --- |
+| `w` / `s` | fit width / fit height |
+| `+` / `-` | zoom in / out |
+| `i` | invert colours |
+
+### Links
+
+| Key | Action |
+| --- | --- |
+| `/` `?` | cycle forward / backward through links, with a preview |
+| `Tab` / `Shift-Tab` | same as `/` and `?` |
+| `Enter` | follow the selected link |
+| `Esc` | close the preview |
+
+### Search
+
+| Key | Action |
+| --- | --- |
+| `f` | open the search box; `Enter` runs it |
+| `n` / `N` | next / previous match |
+| `Esc` | leave the search |
+
+### Presentation
+
+| Key | Action |
+| --- | --- |
+| `p` | toggle presentation mode (fullscreen, one slide at a time) |
+| `j` `l` `J` `Space` | next slide |
+| `k` `h` `K` `PageUp` | previous slide |
+| `w` `s` `+` `-` | locked while presenting: the size never changes |
+
+### Files
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-\` | show / hide the PDF hotbar; `h` `j` `k` `l` select, `Enter` opens |
+
+### Other
+
+| Key | Action |
+| --- | --- |
+| `` ` `` | show / hide this help (`Esc` also closes it) |
+| `q` | quit |
 `kpdf --help` prints the same list; `kpdf --version` prints the installed version.
 
 ## Development
 
 ```sh
-git clone https://github.com/<your-username>/kpdf && cd kpdf
+git clone https://github.com/kostaaaaaa/kpdf && cd kpdf
 uv sync                    # creates .venv with the project (editable) and dev tools
 uv run kpdf some.pdf       # run from the working tree
 uv run pytest              # tests run headless (QT_QPA_PLATFORM=offscreen is set for you)
