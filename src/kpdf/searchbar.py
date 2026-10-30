@@ -4,9 +4,9 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QWidget
 
 _STYLE = """
-SearchBar { background: rgb(28, 28, 28); border: 1px solid #ffbe00; border-radius: 4px; }
+SearchBar { background: rgb(28, 28, 28); border: 1px solid #8c64a7; border-radius: 4px; }
 QLineEdit { background: transparent; border: none; color: #eeeeee;
-            selection-background-color: #ffbe00; selection-color: #000000; }
+            selection-background-color: #8c64a7; selection-color: #000000; }
 QLabel { color: #aaaaaa; }
 """
 

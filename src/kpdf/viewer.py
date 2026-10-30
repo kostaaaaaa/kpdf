@@ -62,7 +62,7 @@ NUM_TIMEOUT_MS = 450  # wait this long for another digit of a page number
 PREVIEW_MIN_SCALE = 1.3  # previews are rendered at least this readable
 CACHE_BYTES = 512 * 1024 * 1024
 BG = QColor(38, 38, 38)
-ACCENT = QColor(255, 190, 0)
+ACCENT = QColor(140, 100, 167)
 HIT = QColor(255, 220, 0, 95)  # search match
 HIT_CUR = QColor(255, 140, 0, 150)  # the match n / N is on
 
@@ -878,7 +878,7 @@ class Viewer(QWidget):
         link = self._links[self.sel] if 0 <= self.sel < len(self._links) else None
         if self.sel_active and link is not None:
             r = self.link_view_rect(link)
-            p.fillRect(r, QColor(255, 200, 0, 90))
+            p.fillRect(r, QColor(140, 100, 167, 90))
             p.setPen(QPen(ACCENT, 1.5))
             p.drawRect(r)
 
