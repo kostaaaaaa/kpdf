@@ -35,7 +35,7 @@ import re
 import statistics
 import sys
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 # PyMuPDF 2.x imports its (unused here) ONNX layout module on `import pymupdf`, which costs ~0.5 s.
 sys.modules.setdefault("pymupdf.layout", None)
@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from . import state  # noqa: E402
 from .helpview import draw_help  # noqa: E402
+from .helpview import layout as help_layout  # noqa: E402
 from .search import PageSearch  # noqa: E402
 from .searchbar import SearchBar  # noqa: E402
 from .tree_sitter import PdfTreeSitter  # noqa: E402
@@ -118,6 +119,15 @@ REFS_RE = re.compile(
 )
 
 
+# MuPDF text flags for get_text("dict") minus TEXT_PRESERVE_IMAGES: dict mode otherwise copies every
+# embedded image's bytes into Python, and lines_of() throws image blocks away anyway.
+TEXT_FLAGS = getattr(
+    fitz,
+    "TEXTFLAGS_TEXT",
+    fitz.TEXT_PRESERVE_LIGATURES | fitz.TEXT_PRESERVE_WHITESPACE | fitz.TEXT_MEDIABOX_CLIP,
+)
+
+
 # -------------------------------------------------------------- file access
 def file_sig(path):
     """(mtime_ns, size) of a file, or None if it is not there (e.g. latexmk is mid-replace)."""
@@ -126,6 +136,15 @@ def file_sig(path):
     except OSError:
         return None
     return (st.st_mtime_ns, st.st_size)
+
+
+def page_sizes(doc):
+    """[(width, height)] in pt of every page; loads each page once."""
+    out = []
+    for i in range(doc.page_count):
+        r = doc[i].rect
+        out.append((r.width, r.height))
+    return out
 
 
 def read_pdf(path, require_eof=False):
@@ -152,6 +171,7 @@ class Link:
     dest: "fitz.Point"  # destination point on dpage (pt, TOP-LEFT origin, see _named_point)
     text: str  # text under the link ("[12]", "Fig. 3", ...)
     name: str = ""  # PDF named destination, e.g. "cite.gottesman97" (may be empty)
+    clip: object = field(default=None, repr=False, compare=False)  # cached (rect, kind) preview
 
 
 def _union(a, b):
@@ -290,7 +310,7 @@ class Viewer(QWidget):
         self.n = self.doc.page_count
         if self.n == 0:
             raise SystemExit("Empty document.")
-        self.sizes = [(self.doc[i].rect.width, self.doc[i].rect.height) for i in range(self.n)]
+        self.sizes = page_sizes(self.doc)
 
         self.zoom = 1.0
         self.sx = self.sy = 0.0
@@ -318,6 +338,7 @@ class Viewer(QWidget):
 
         self.search = None  # PageSearch while a search is active
         self.help = False  # the help screen (backtick) is showing
+        QTimer.singleShot(0, self._warm_help)  # load its font before the first backtick
         self.s_cur = None  # (page, index) of the match we are on
         self._s_wrapped = False
         self._bar = SearchBar(self)
@@ -357,7 +378,7 @@ class Viewer(QWidget):
         self.path = path
         self._sig = new_sig
         self.n = self.doc.page_count
-        self.sizes = [(self.doc[i].rect.width, self.doc[i].rect.height) for i in range(self.n)]
+        self.sizes = page_sizes(self.doc)
         self.zoom = 1.0
         self.sx = self.sy = 0.0
         self.fit = "w"
@@ -463,7 +484,7 @@ class Viewer(QWidget):
         old_doc, old_sizes = self.doc, self.sizes
         self.doc = new_doc
         self.n = new_doc.page_count
-        self.sizes = [(new_doc[i].rect.width, new_doc[i].rect.height) for i in range(self.n)]
+        self.sizes = page_sizes(new_doc)
         self.cache.clear()
         self._lines.clear()
         self._mathflag.clear()
@@ -528,6 +549,9 @@ class Viewer(QWidget):
         super().closeEvent(e)
 
     # ---- help screen (helptext.py says what is on it, helpview.py draws it
+    def _warm_help(self):
+        help_layout(self.width(), self.height())
+
     def _toggle_help(self):
         self.help = not self.help
         if self.help:
@@ -1079,7 +1103,7 @@ class Viewer(QWidget):
         """[(Rect, text)] for every text line on a page (cached)."""
         if pno not in self._lines:
             out, flags = [], []
-            for b in self.doc[pno].get_text("dict")["blocks"]:
+            for b in self.doc[pno].get_text("dict", flags=TEXT_FLAGS)["blocks"]:
                 if b.get("type") != 0:
                     continue
                 for ln in b["lines"]:
@@ -1299,7 +1323,8 @@ class Viewer(QWidget):
         with contextlib.suppress(Exception):
             gr += [fitz.Rect(im["bbox"]) for im in page.get_image_info()]
         with contextlib.suppress(Exception):
-            gr += [fitz.Rect(dr["rect"]) for dr in page.get_drawings()]
+            draw = getattr(page, "get_cdrawings", page.get_drawings)  # the lighter variant
+            gr += [fitz.Rect(dr["rect"]) for dr in draw()]
         gr = [g for g in gr if not (g.width > 0.95 * P.width and g.height > 0.8 * P.height)]
 
         def touches(g, reg):
@@ -1451,7 +1476,12 @@ class Viewer(QWidget):
         return fitz.Rect(min(x0, reg.x0) - 6, y0, max(x1, reg.x1) + 6, y1)
 
     def compute_clip(self, L):
-        """-> (clip rect on the destination page, kind of destination)."""
+        """-> (clip rect on the destination page, kind of destination); cached on the link."""
+        if L.clip is None:  # links are rebuilt when the PDF reloads, so this never goes stale
+            L.clip = self._compute_clip(L)
+        return L.clip
+
+    def _compute_clip(self, L):
         P = self.doc[L.dpage].rect
         d = L.dest
         cx0, cx1 = self.column(L.dpage, d.x)
