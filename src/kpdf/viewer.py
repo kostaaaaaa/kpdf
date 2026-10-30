@@ -13,6 +13,7 @@ Keys
   J / K          next / previous page
   Ctrl-d / u     half-screen down / up      Space / PageDown / PageUp: screen
   + / -          zoom in / out
+  c              table of contents (left panel): j / k or Up / Down move, Enter jumps, Esc closes
   f              search the text: type, Enter to run it; n / N = next / previous match
   /  and  ?      cycle forward / backward through internal links
                  (citations, figures, tables, equations, sections) and
@@ -45,7 +46,7 @@ except ImportError:  # older PyMuPDF versions
     import fitz
 
 from PyQt6.QtCore import QFileSystemWatcher, QPointF, QRectF, Qt, QTimer  # noqa: E402
-from PyQt6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap  # noqa: E402
+from PyQt6.QtGui import QColor, QFont, QFontMetrics, QImage, QPainter, QPen, QPixmap  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from . import state  # noqa: E402
@@ -66,6 +67,15 @@ BG = QColor(38, 38, 38)
 ACCENT = QColor(140, 100, 167)
 HIT = QColor(255, 220, 0, 95)  # search match
 HIT_CUR = QColor(255, 140, 0, 150)  # the match n / N is on
+
+# table of contents panel (c)
+TOC_FRAC, TOC_MIN_W, TOC_MAX_W = 0.3, 240, 520  # width: share of the window, clamped (px)
+TOC_BG = QColor(22, 22, 22, 245)
+TOC_SEL = QColor(140, 100, 167, 120)
+TOC_FG = QColor(220, 220, 240)
+TOC_DIM = QColor(130, 130, 150)
+# some PyMuPDF versions leave 'to' out of named outline entries but keep it in the name
+TOC_NAME_RE = re.compile(r"zoom=[^,&]*,\s*(-?\d+(?:\.\d+)?),\s*(-?\d+(?:\.\d+)?)")
 
 # live reload (a recompile rewrites the PDF; the viewer picks the new copy up by itself)
 RELOAD_DEBOUNCE_MS = 150  # wait for the burst of file events a compile produces to settle
@@ -338,6 +348,9 @@ class Viewer(QWidget):
 
         self.search = None  # PageSearch while a search is active
         self.help = False  # the help screen (backtick) is showing
+        self._toc = None  # [(level, title, page, (x, y) | None)], loaded when c is first pressed
+        self.toc_open = False
+        self.toc_sel = self.toc_top = 0  # selected entry, first entry on screen
         QTimer.singleShot(0, self._warm_help)  # load its font before the first backtick
         self.s_cur = None  # (page, index) of the match we are on
         self._s_wrapped = False
@@ -395,6 +408,8 @@ class Viewer(QWidget):
         QTimer.singleShot(0, self._pump_links)
         self.sel = -1
         self.close_preview()
+        self._toc = None
+        self.toc_open = False
         self.history.clear()
         self.num = ""
         self.num_timer.stop()
@@ -496,6 +511,7 @@ class Viewer(QWidget):
         self._link_iter = iter_page_links(self.doc)
         QTimer.singleShot(0, self._pump_links)
         self.sel = -1  # link indices mean nothing in the new document
+        self._toc = None  # re-read (and the selection clamped) the next time it is shown
         self.close_preview()
 
         if self.presenting:
@@ -559,6 +575,156 @@ class Viewer(QWidget):
         elif self.search is not None:
             self._bar.show()
         self.update()
+
+    # ---- table of contents (c): a panel on the left, the PDF's own outline
+    @staticmethod
+    def _toc_point(dest):
+        """(x, y) an outline entry points at in raw PDF user space (y up), or None.
+
+        get_toc() resolves LaTeX's named destinations like resolve_names() does, so the y is
+        flipped into page space by _named_point() when the entry is followed."""
+        if not isinstance(dest, dict):
+            return None
+        to = dest.get("to")
+        if to is not None and _finite(to[0], to[1]):
+            return (float(to[0]), float(to[1]))
+        m = TOC_NAME_RE.search(str(dest.get("name") or ""))
+        if m and _finite(float(m.group(1)), float(m.group(2))):
+            return (float(m.group(1)), float(m.group(2)))
+        return None
+
+    def toc_entries(self):
+        """[(level, title, page, (x, y) | None)]; page is 0-based, -1 if it is not in this PDF."""
+        if self._toc is None:
+            try:
+                raw = self.doc.get_toc(simple=False)
+            except Exception:  # a damaged outline must not take the viewer down
+                raw = []
+            self._toc = [
+                (
+                    max(int(lvl), 1),
+                    " ".join(str(title).split()) or "-",
+                    page - 1 if 1 <= page <= self.n else -1,
+                    self._toc_point(dest),
+                )
+                for lvl, title, page, dest in raw
+            ]
+            self.toc_sel = min(self.toc_sel, max(len(self._toc) - 1, 0))
+        return self._toc
+
+    def _toc_geom(self):
+        """(font, metrics, row height, rows that fit, panel width)."""
+        font = QFont("monospace", 10)
+        fm = QFontMetrics(font)
+        row_h = fm.lineSpacing() + 4
+        w = int(min(max(self.width() * TOC_FRAC, TOC_MIN_W), TOC_MAX_W, self.width()))
+        rows = max((self.height() - 22 - 2 * row_h) // row_h, 1)  # header above, status line below
+        return font, fm, row_h, rows, w
+
+    def _toc_clamp(self, rows):
+        n = len(self.toc_entries())
+        self.toc_sel = min(max(self.toc_sel, 0), max(n - 1, 0))
+        if self.toc_sel < self.toc_top:
+            self.toc_top = self.toc_sel
+        elif self.toc_sel >= self.toc_top + rows:
+            self.toc_top = self.toc_sel - rows + 1
+        self.toc_top = min(max(self.toc_top, 0), max(n - rows, 0))
+
+    def toggle_toc(self):
+        if self.presenting:  # like the hotbar: not while presenting
+            return
+        if self.toc_open:
+            self.toc_open = False
+        else:
+            self.close_preview()
+            entries = self.toc_entries()
+            here = self.current_page()  # start on the section being read
+            self.toc_sel = max((i for i, e in enumerate(entries) if 0 <= e[2] <= here), default=0)
+            rows = self._toc_geom()[3]
+            self.toc_top = max(self.toc_sel - rows // 2, 0)
+            self._toc_clamp(rows)
+            self.toc_open = True
+        self.update()
+
+    def _toc_go(self):
+        entries = self.toc_entries()
+        if not entries:
+            return
+        _, _, pno, pt = entries[self.toc_sel]
+        if pno < 0:  # points outside this document: nothing to jump to
+            return
+        self.push_history()  # Backspace / Ctrl-o come back to where you were
+        self.toc_open = False
+        self.close_preview()
+        top = self.tops[pno]
+        if pt is None:
+            self.sy = top
+        else:
+            y = _named_point(self.doc[pno].transformation_matrix, {"to": pt}).y
+            y = min(max(y, 0.0), self.sizes[pno][1])
+            self.sy = max(top, top + y * self.zoom - 0.2 * self.height())  # never above the page
+        self.clamp()
+        self.update()
+
+    def _toc_key(self, k, m, t):
+        """Keys while the panel is open (it is modal). False = not ours: quit / help still work."""
+        K = Qt.Key
+        if t in ("q", "`") or k == K.Key_QuoteLeft:
+            return False
+        if m & Qt.KeyboardModifier.ControlModifier and k == K.Key_Q:
+            return False
+        rows = self._toc_geom()[3]
+        if k in (K.Key_Return, K.Key_Enter):
+            self._toc_go()
+        elif k == K.Key_Escape or t == "c":
+            self.toc_open = False
+        elif t == "j" or k == K.Key_Down:
+            self.toc_sel += 1
+        elif t == "k" or k == K.Key_Up:
+            self.toc_sel -= 1
+        elif k == K.Key_PageDown:
+            self.toc_sel += rows
+        elif k == K.Key_PageUp:
+            self.toc_sel -= rows
+        self._toc_clamp(rows)
+        self.update()
+        return True
+
+    def _draw_toc(self, p):
+        entries = self.toc_entries()
+        font, fm, row_h, rows, w = self._toc_geom()
+        self._toc_clamp(rows)
+        left, right = Qt.AlignmentFlag.AlignLeft, Qt.AlignmentFlag.AlignRight
+        mid = Qt.AlignmentFlag.AlignVCenter
+        p.save()
+        p.setFont(font)
+        p.fillRect(QRectF(0, 0, w, self.height()), TOC_BG)
+        p.setPen(QPen(ACCENT, 1))
+        p.drawLine(QPointF(w - 0.5, 0), QPointF(w - 0.5, self.height()))
+        p.setPen(ACCENT)
+        p.drawText(QRectF(10, 0, w - 20, row_h), mid | left, "contents")
+        if not entries:
+            p.setPen(TOC_DIM)
+            p.drawText(QRectF(10, row_h, w - 20, row_h), mid | left, "no table of contents")
+        else:
+            count = f"{self.toc_sel + 1}/{len(entries)}"
+            p.drawText(QRectF(10, 0, w - 20, row_h), mid | right, count)
+            cw = fm.horizontalAdvance("M")
+            pw = fm.horizontalAdvance("0" * len(str(self.n)))  # page-number column
+            y = float(row_h)
+            for i in range(self.toc_top, min(self.toc_top + rows, len(entries))):
+                lvl, title, pno, _ = entries[i]
+                if i == self.toc_sel:
+                    p.fillRect(QRectF(0, y, w - 1, row_h), TOC_SEL)
+                p.setPen(TOC_FG if pno >= 0 else TOC_DIM)
+                indent = 10 + (lvl - 1) * 2 * cw
+                avail = max(w - indent - pw - 20, 20)
+                text = fm.elidedText(title, Qt.TextElideMode.ElideRight, int(avail))
+                p.drawText(QRectF(indent, y, avail, row_h), mid | left, text)
+                if pno >= 0:
+                    p.drawText(QRectF(w - pw - 10, y, pw, row_h), mid | right, str(pno + 1))
+                y += row_h
+        p.restore()
 
     # ---- presentation mode (p): zen / fullscreen, one slide at a time, nothing to resize
     def toggle_presentation(self):
@@ -921,6 +1087,9 @@ class Viewer(QWidget):
                 p.drawPixmap(QPointF(x, y), pix)
                 if self.invert:
                     self._invert_rect(p, QRectF(x, y, w, h))
+
+        if self.toc_open:
+            self._draw_toc(p)
 
         # status line
         txt = f" {self.current_page() + 1}/{self.n}  {int(self.zoom * 100)}% "
@@ -1554,6 +1723,9 @@ class Viewer(QWidget):
             self._toggle_help()
             return
 
+        if self.toc_open and self._toc_key(k, m, t):
+            return
+
         if ctrl and k == K.Key_Backslash:
             if not self.presenting:  # the PDF hotbar is not available while presenting
                 self.tree_sitter.toggle()
@@ -1607,6 +1779,8 @@ class Viewer(QWidget):
             self.cycle(-1)
         elif t == "/" or k == K.Key_Slash:
             self.cycle(-1 if shift else 1)
+        elif t == "c":
+            self.toggle_toc()
         elif t == "f":
             self._bar.open()
         elif t == "`" or k == K.Key_QuoteLeft:
