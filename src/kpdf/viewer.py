@@ -14,6 +14,7 @@ Keys
   Ctrl-d / u     half-screen down / up      Space / PageDown / PageUp: screen
   + / -          zoom in / out
   c              table of contents (left panel): j / k or Up / Down move, Enter jumps, Esc closes
+                 type an entry's number (shown beside it) to select it; Enter then jumps
   f              search the text: type, Enter to run it; n / N = next / previous match
   /  and  ?      cycle forward / backward through internal links
                  (citations, figures, tables, equations, sections) and
@@ -634,7 +635,7 @@ class Viewer(QWidget):
         if self.presenting:  # like the hotbar: not while presenting
             return
         if self.toc_open:
-            self.toc_open = False
+            self._toc_close()
         else:
             self.close_preview()
             entries = self.toc_entries()
@@ -646,6 +647,19 @@ class Viewer(QWidget):
             self.toc_open = True
         self.update()
 
+    def _toc_close(self):
+        self.toc_open = False
+        self._drop_number()  # a pending entry number must not fire as a page number later
+
+    def _toc_select(self, i):
+        """Highlight entry i (0-based) without leaving the panel; centred if it was off screen."""
+        n = len(self.toc_entries())
+        rows = self._toc_geom()[3]
+        self.toc_sel = min(max(i, 0), max(n - 1, 0))
+        if not self.toc_top <= self.toc_sel < self.toc_top + rows:
+            self.toc_top = max(self.toc_sel - rows // 2, 0)
+        self._toc_clamp(rows)
+
     def _toc_go(self):
         entries = self.toc_entries()
         if not entries:
@@ -654,7 +668,7 @@ class Viewer(QWidget):
         if pno < 0:  # points outside this document: nothing to jump to
             return
         self.push_history()  # Backspace / Ctrl-o come back to where you were
-        self.toc_open = False
+        self._toc_close()
         self.close_preview()
         top = self.tops[pno]
         if pt is None:
@@ -671,13 +685,28 @@ class Viewer(QWidget):
         K = Qt.Key
         if t in ("q", "`") or k == K.Key_QuoteLeft:
             return False
-        if m & Qt.KeyboardModifier.ControlModifier and k == K.Key_Q:
+        ctrl = bool(m & Qt.KeyboardModifier.ControlModifier)
+        if ctrl and k == K.Key_Q:
             return False
         rows = self._toc_geom()[3]
+        if not ctrl and len(t) == 1 and t in "0123456789":
+            if self.toc_entries():  # an empty outline has nothing to number
+                self.feed_digit(t)  # same buffer as page numbers; selects, never jumps
+            return True
+        if self.num and k not in (K.Key_Escape, K.Key_Return, K.Key_Enter):
+            self.commit_number()  # any other key first settles the number typed so far
         if k in (K.Key_Return, K.Key_Enter):
-            self._toc_go()
-        elif k == K.Key_Escape or t == "c":
-            self.toc_open = False
+            if self.num:
+                self.commit_number()  # Enter on a half-typed number only selects: Enter again goes
+            else:
+                self._toc_go()
+        elif k == K.Key_Escape:
+            if self.num:
+                self._drop_number()  # cancel the half-typed number, keep the panel open
+            else:
+                self._toc_close()
+        elif t == "c":
+            self._toc_close()
         elif t == "j" or k == K.Key_Down:
             self.toc_sel += 1
         elif t == "k" or k == K.Key_Up:
@@ -711,13 +740,20 @@ class Viewer(QWidget):
             p.drawText(QRectF(10, 0, w - 20, row_h), mid | right, count)
             cw = fm.horizontalAdvance("M")
             pw = fm.horizontalAdvance("0" * len(str(self.n)))  # page-number column
+            num_font = QFont(font)  # entry numbers are italic: never mistaken for page numbers
+            num_font.setItalic(True)
+            nw = QFontMetrics(num_font).horizontalAdvance("0" * len(str(len(entries))))
             y = float(row_h)
             for i in range(self.toc_top, min(self.toc_top + rows, len(entries))):
                 lvl, title, pno, _ = entries[i]
                 if i == self.toc_sel:
                     p.fillRect(QRectF(0, y, w - 1, row_h), TOC_SEL)
+                p.setPen(TOC_DIM)  # the number you type to select this entry
+                p.setFont(num_font)
+                p.drawText(QRectF(10, y, nw, row_h), mid | right, str(i + 1))
+                p.setFont(font)
                 p.setPen(TOC_FG if pno >= 0 else TOC_DIM)
-                indent = 10 + (lvl - 1) * 2 * cw
+                indent = 10 + nw + 8 + (lvl - 1) * 2 * cw
                 avail = max(w - indent - pw - 20, 20)
                 text = fm.elidedText(title, Qt.TextElideMode.ElideRight, int(avail))
                 p.drawText(QRectF(indent, y, avail, row_h), mid | left, text)
@@ -1168,18 +1204,24 @@ class Viewer(QWidget):
         self.clamp()
         self.update()
 
+    def _drop_number(self):
+        """Forget a half-typed number (a page, or a contents entry while the panel is open)."""
+        self.num = ""
+        self.num_timer.stop()
+
     def feed_digit(self, d):
+        # the same buffer serves both: pages normally, contents entries while the panel is open
+        limit = len(self.toc_entries()) if self.toc_open else self.n
         buf = self.num + d
-        if int(buf) > self.n:  # can't be a valid page: flush old, start over
+        if int(buf) > limit:  # can't be a valid number: flush old, start over
             self.commit_number()
             buf = d
         if int(buf) == 0:
-            self.num = ""
-            self.num_timer.stop()
+            self._drop_number()
             self.update()
             return
         self.num = buf
-        if int(buf) * 10 > self.n:  # no longer digit could still be valid
+        if int(buf) * 10 > limit:  # no longer digit could still be valid
             self.commit_number()
         else:
             self.num_timer.start(NUM_TIMEOUT_MS)
@@ -1190,7 +1232,10 @@ class Viewer(QWidget):
         if self.num:
             n = int(self.num)
             self.num = ""
-            self.goto_page(n - 1)
+            if self.toc_open:
+                self._toc_select(n - 1)  # only highlights: Enter does the actual jump
+            else:
+                self.goto_page(n - 1)
         self.update()
 
     # --------------------------------------------------------------- links
