@@ -740,14 +740,18 @@ class Viewer(QWidget):
             p.drawText(QRectF(10, 0, w - 20, row_h), mid | right, count)
             cw = fm.horizontalAdvance("M")
             pw = fm.horizontalAdvance("0" * len(str(self.n)))  # page-number column
-            nw = fm.horizontalAdvance("0" * len(str(len(entries))))  # entry-number column
+            num_font = QFont(font)  # entry numbers are italic: never mistaken for page numbers
+            num_font.setItalic(True)
+            nw = QFontMetrics(num_font).horizontalAdvance("0" * len(str(len(entries))))
             y = float(row_h)
             for i in range(self.toc_top, min(self.toc_top + rows, len(entries))):
                 lvl, title, pno, _ = entries[i]
                 if i == self.toc_sel:
                     p.fillRect(QRectF(0, y, w - 1, row_h), TOC_SEL)
                 p.setPen(TOC_DIM)  # the number you type to select this entry
+                p.setFont(num_font)
                 p.drawText(QRectF(10, y, nw, row_h), mid | right, str(i + 1))
+                p.setFont(font)
                 p.setPen(TOC_FG if pno >= 0 else TOC_DIM)
                 indent = 10 + nw + 8 + (lvl - 1) * 2 * cw
                 avail = max(w - indent - pw - 20, 20)
