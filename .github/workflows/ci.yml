@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uv run --locked ruff check .
       - run: uv run --locked ruff format --check .
 
@@ -34,7 +34,7 @@ jobs:
       QT_QPA_PLATFORM: offscreen
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - name: Qt system libraries
         run: |
           sudo apt-get update
@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0       # setuptools-scm needs the tags
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uv build
       - run: uvx twine check --strict dist/*
 
@@ -56,5 +56,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10.3.0
+      - uses: astral-sh/setup-uv@v10.3.2
       - run: uv run --locked pip-audit
