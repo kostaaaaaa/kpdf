@@ -36,7 +36,7 @@ kpdf = "kpdf:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
+    "pytest>=9.2.0",
     "ruff",
     "pip-audit",
     "pre-commit",
